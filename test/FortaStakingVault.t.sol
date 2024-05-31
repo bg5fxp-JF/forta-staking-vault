@@ -4,17 +4,29 @@
 pragma solidity 0.8.23;
 
 import { IAccessControl } from "@openzeppelin/contracts/access/IAccessControl.sol";
+import { IERC20, IERC20Errors } from "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
+import { ERC4626Upgradeable } from "@openzeppelin-upgradeable/contracts/token/ERC20/extensions/ERC4626Upgradeable.sol";
 import { FortaStakingUtils } from "@forta-staking/FortaStakingUtils.sol";
 import { DELEGATOR_SCANNER_POOL_SUBJECT } from "@forta-staking/SubjectTypeValidator.sol";
-import { TestHelpers } from "./fixture/TestHelpers.sol";
+import { TestHelpers, RedemptionReceiver } from "./fixture/TestHelpers.sol";
 import { IFortaStaking } from "../src/interfaces/IFortaStaking.sol";
 import { FortaStakingVault } from "../src/FortaStakingVault.sol";
 import { IRewardsDistributor } from "../src/interfaces/IRewardsDistributor.sol";
+import { IERC1155Receiver } from "@openzeppelin/contracts/token/ERC1155/IERC1155Receiver.sol";
+import { IERC165 } from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import { console } from "forge-std/console.sol";
 
 contract FortaStakingVaultTest is TestHelpers {
     function setUp() public {
         _forkPolygon();
         _deployVault(0);
+    }
+
+    function test_supportsInterface() public {
+        assertTrue(
+            vault.supportsInterface(type(IERC1155Receiver).interfaceId)
+                || vault.supportsInterface(type(IERC165).interfaceId)
+        );
     }
 
     function test_delegate() external {
@@ -113,6 +125,77 @@ contract FortaStakingVaultTest is TestHelpers {
         vm.stopPrank();
 
         assertEq(FORT_TOKEN.balanceOf(alice), 100, "Unexpected final balance");
+    }
+
+    function test_redeem_callerNotOwner() external {
+        _deposit(alice, 100, 100);
+
+        uint256 subject1 = 55;
+        uint256 subject2 = 56;
+
+        vm.startPrank(operator);
+        vault.delegate(subject1, 60);
+        vault.delegate(subject2, 30);
+        vm.stopPrank();
+
+        vm.prank(alice);
+        vault.approve(bob, 20);
+
+        vm.startPrank(bob);
+        vault.redeem(20, alice, alice); // 20% of shares
+        // should get 20% of 10 which is the balance in the vault
+        assertEq(FORT_TOKEN.balanceOf(alice), 2, "Unexpected balance after redeem");
+        address redemptionReceiver = vault.getRedemptionReceiver(alice);
+        // should get 20% of 60 which is the amount of shares in subject subject1
+        assertEq(
+            FORTA_STAKING.inactiveSharesOf(DELEGATOR_SCANNER_POOL_SUBJECT, subject1, redemptionReceiver),
+            12,
+            "Unexpected shares in subject subject1"
+        );
+        // should get 20% of 30 which is the amount of shares in subject subject1
+        assertEq(
+            FORTA_STAKING.inactiveSharesOf(DELEGATOR_SCANNER_POOL_SUBJECT, subject2, redemptionReceiver),
+            6,
+            "Unexpected shares in subject subject2"
+        );
+        vm.stopPrank();
+    }
+
+    function test_redeem_failInsufficientAllowance() external {
+        _deposit(alice, 100, 100);
+
+        uint256 subject1 = 55;
+        uint256 subject2 = 56;
+        uint256 shares = 20;
+
+        vm.startPrank(operator);
+        vault.delegate(subject1, 60);
+        vault.delegate(subject2, 30);
+        vm.stopPrank();
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, bob, 0, shares));
+        vault.redeem(shares, alice, alice);
+    }
+
+    function test_redeem_failMaxShares() external {
+        _deposit(alice, 100, 100);
+
+        uint256 subject1 = 55;
+        uint256 subject2 = 56;
+        uint256 shares = 101;
+        uint256 maxShares = 100;
+
+        vm.startPrank(operator);
+        vault.delegate(subject1, 60);
+        vault.delegate(subject2, 30);
+        vm.stopPrank();
+
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxRedeem.selector, alice, shares, maxShares)
+        );
+        vault.redeem(shares, alice, alice);
     }
 
     function test_updateFeeSettings() external {
@@ -300,6 +383,28 @@ contract FortaStakingVaultTest is TestHelpers {
         vault.claimRewards(subject, epoch);
     }
 
+    function test_claimRedeem_for_subjects() external {
+        _deployVault(5000); // 50% fee
+        _deposit(alice, 100, 100);
+
+        uint256 subject1 = 55;
+        uint256 subject2 = 56;
+
+        vm.startPrank(operator);
+        vault.delegate(subject1, 60);
+        vault.delegate(subject2, 30);
+        vm.stopPrank();
+
+        vm.startPrank(alice);
+        vault.redeem(20, alice, alice);
+
+        // If no time passed then in RedemptionReceiver.claim()
+        // if ((subjectsPending[subject] < block.timestamp)) == false and else path is running
+        assertEq(vault.claimRedeem(bob), 0, "No time passed =>  no stakes provided");
+
+        vm.stopPrank();
+    }
+
     function test_failOnEmptyDelegations() external {
         _deposit(alice, 100, 100);
 
@@ -411,5 +516,132 @@ contract FortaStakingVaultTest is TestHelpers {
 
         // undelegate subjects
         vault.undelegate(subject1);
+    }
+
+    function test_failInvalidUndelegationIfSubjectDoesntExist() external {
+        _deposit(alice, 100, 100);
+
+        vm.expectRevert(FortaStakingVault.InvalidUndelegation.selector);
+        vault.undelegate(100);
+    }
+    // function test_failInvalidUndelegationIfSubjectExceedsDeadline() external {
+    //     _deposit(alice, 100 , 100);
+
+    //     uint256 subject1 = 55;
+
+    //     //delegate and initiate undelegate
+    //     vm.startPrank(operator);
+    //     vault.delegate(subject1, 50 ether);
+    //     (, address distributor) = vault.initiateUndelegate(subject1, 50 ether);
+    //     vm.stopPrank();
+
+    //     vm.expectRevert(FortaStakingVault.InvalidUndelegation.selector);
+    //     vault.undelegate(100);
+    // }
+
+    function test_mint() external asPrankedUser(alice) {
+        address user = alice;
+        uint256 mint = 100;
+
+        deal(address(FORT_TOKEN), user, mint * 2);
+        FORT_TOKEN.approve(address(vault), mint * 2);
+        vault.mint(mint, user);
+        assertEq(vault.balanceOf(user), mint);
+
+        // test if balance increases if minting again
+        vault.mint(mint, user);
+        assertEq(vault.balanceOf(user), mint + mint);
+    }
+
+    function test_withdraw() external {
+        _deposit(alice, 100, 100);
+        // console.log(FORT_TOKEN.balanceOf(address(vault)));
+
+        uint256 subject1 = 55;
+        uint256 subject2 = 56;
+
+        vm.startPrank(operator);
+        vault.delegate(subject1, 60);
+        vault.delegate(subject2, 30);
+        vm.stopPrank();
+
+        // console.log(FORT_TOKEN.balanceOf(alice));
+        // console.log(FORT_TOKEN.balanceOf(address(vault)));
+
+        vm.startPrank(alice);
+        vault.withdraw(30, alice, alice); // 20% of shares
+        // should get 20% of 10 which is the balance in the vault
+        assertEq(FORT_TOKEN.balanceOf(alice), 3, "Unexpected balance after redeem");
+        address redemptionReceiver = vault.getRedemptionReceiver(alice);
+        // should get 20% of 60 which is the amount of shares in subject subject1
+        assertEq(
+            FORTA_STAKING.inactiveSharesOf(DELEGATOR_SCANNER_POOL_SUBJECT, subject1, redemptionReceiver),
+            18,
+            "Unexpected shares in subject subject1"
+        );
+        // should get 20% of 30 which is the amount of shares in subject subject1
+        assertEq(
+            FORTA_STAKING.inactiveSharesOf(DELEGATOR_SCANNER_POOL_SUBJECT, subject2, redemptionReceiver),
+            9,
+            "Unexpected shares in subject subject2"
+        );
+        vm.stopPrank();
+    }
+
+    function test_getExpectedAssets() external {
+        _deposit(alice, 100, 100);
+        _deposit(bob, 200, 200);
+
+        uint256 subject1 = 55;
+        uint256 subject2 = 56;
+
+        vm.startPrank(operator);
+        vault.delegate(subject1, 100);
+        vault.delegate(subject2, 200);
+
+        vault.initiateUndelegate(subject1, 50);
+
+        // No 2 undelegations on the same pool are allowed
+        vm.expectRevert(FortaStakingVault.PendingUndelegation.selector);
+        vault.initiateUndelegate(subject1, 50);
+        vm.stopPrank();
+
+        // 1st alice withdraw
+        vm.startPrank(alice);
+        vault.redeem(50, alice, alice);
+
+        // let deadline pass
+        vm.warp(block.timestamp + 10 days + 1);
+        vault.claimRedeem(alice);
+        vault.undelegate(subject1);
+
+        vault.claimRedeem(alice);
+
+        vm.stopPrank();
+
+        // multiple users
+        vm.startPrank(operator);
+        // it can now be undelegated again
+        vault.initiateUndelegate(subject1, 40);
+
+        // let some time pass so the undelegations have different deadline
+        vm.warp(block.timestamp + 1 days);
+        vault.initiateUndelegate(subject2, 100);
+
+        vm.stopPrank();
+
+        vm.startPrank(alice);
+        // do 2 different redeems, they should aggregate correctly
+        vault.redeem(25, alice, alice);
+
+        RedemptionReceiver redemptionReceiver = RedemptionReceiver(vault.getRedemptionReceiver(alice));
+
+        assertEq(
+            redemptionReceiver.getExpectedAssets(),
+            vault.getExpectedAssets(alice),
+            "getExpectedAssets() function works properly"
+        );
+
+        vm.stopPrank();
     }
 }

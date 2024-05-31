@@ -5,7 +5,7 @@ Forta Staking enable users to get rewards by staking their FORT tokens. Users ne
 ## Deployed Contracts
 
 | Contract                           | Polygon                                                                                                                       |
-|:-----------------------------------|:------------------------------------------------------------------------------------------------------------------------------|
+| :--------------------------------- | :---------------------------------------------------------------------------------------------------------------------------- |
 | FortaStakingVault (Proxy)          | [0xF22F690A41d22496496d4959acFFf0f3baCC24F1](https://polygonscan.com/address/0xf22f690a41d22496496d4959acfff0f3bacc24f1#code) |
 | FortaStakingVault (Implementation) | [0x35Bb253BF0802EAC46E42E46B9fA697a250aBA01](https://polygonscan.com/address/0x35bb253bf0802eac46e42e46b9fa697a250aba01#code) |
 | RedemptionReceiver                 | [0xcEcD2A3248863461c7E50930551E78CBea3098F1](https://polygonscan.com/address/0xcecd2a3248863461c7e50930551e78cbea3098f1#code) |
@@ -73,6 +73,12 @@ For checking coverage run
 
 ```bash
 $ forge coverage
+```
+
+To check the coverage in detail
+
+```bash
+$ forge coverage --report debug > coverage.txt
 ```
 
 ## Documentation
